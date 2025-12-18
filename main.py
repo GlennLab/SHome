@@ -73,7 +73,7 @@ if __name__ == "__main__":
         username="hobby",
         jwt_token=os.getenv("JWT_TOKEN"),
         # ca_cert_path=str(Path(__file__).parent / 'modules' / "ca-chain.cert.pem")
-        ca_cert_path='/home/projectg/PycharmProjects/GHome/modules/ca-chain.cert.pem'
+        ca_cert_path='/ca-chain.cert.pem'
     )
 
     niko_service = NikoService(niko_controller = niko)
