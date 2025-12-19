@@ -9,8 +9,10 @@ import threading
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 
-from datastructures.duco import DucoBoxSystem, DucoNode, VentilationMode
-from modules.duco import DucoModbusClient, NodeType
+from datastructures.duco import (
+    DucoBoxSystem, DucoNode, NodeType, VentilationMode,
+)
+from modules.duco import DucoModbusClient
 from core.publisher import UnifiedRedisPublisher
 
 
@@ -40,15 +42,15 @@ class DucoPollingService:
         self.redis_publisher = redis_publisher
         self.poll_interval = poll_interval
         self.logger = logger or logging.getLogger(__name__)
-        
+
         self.running = False
         self.thread: Optional[threading.Thread] = None
-        
+
         # Cache for node IDs
         self.active_nodes: List[int] = []
         self.last_network_scan: Optional[datetime] = None
         self.network_scan_interval = 300  # Re-scan network every 5 minutes
-        
+
         # Statistics
         self.stats = {
             'polls': 0,
@@ -130,7 +132,7 @@ class DucoPollingService:
         try:
             # Get system information
             system_info = self.duco_client.get_system_info()
-            
+
             if not system_info:
                 self.logger.warning("No system info retrieved")
                 return
@@ -146,27 +148,27 @@ class DucoPollingService:
             ducobox = DucoBoxSystem(
                 device_id="ducobox_main",
                 node_type=NodeType.DUCOBOX,
-                
+
                 # System status
                 status=system_info.get('ventilation_status').value if system_info.get('ventilation_status') else None,
                 ventilation_mode=system_info.get('ventilation_mode'),
-                
+
                 # Air quality
                 humidity_level=system_info.get('humidity'),
                 co2_level=system_info.get('co2'),
                 air_quality_rh=system_info.get('air_quality_rh'),
                 air_quality_co2=system_info.get('air_quality_co2'),
-                
+
                 # Filter
                 remaining_filter_time=filter_remaining,
                 filter_status=filter_status.value if filter_status else None,
-                
+
                 # Temperatures
                 temperature_oda=temps.get('outdoor_air'),
                 temperature_sup=temps.get('supply_air'),
                 temperature_eta=temps.get('extract_air'),
                 temperature_eha=temps.get('exhaust_air'),
-                
+
                 # System info
                 api_version=system_info.get('api_version'),
                 remaining_write_actions=system_info.get('remaining_write_actions')
@@ -174,7 +176,7 @@ class DucoPollingService:
 
             # Publish to Redis
             success = self.redis_publisher.publish_ducobox(ducobox)
-            
+
             if success:
                 self.stats['system_updates'] += 1
                 self.logger.debug(
@@ -197,25 +199,33 @@ class DucoPollingService:
 
         for node_id in self.active_nodes:
             try:
-                # Get node info
-                node_info = self.duco_client.get_node_info(node_id)
-                
-                if not node_info:
-                    continue
-
-                # Get node type
+                # Get node type first
                 node_type = self.duco_client.get_node_type(node_id)
                 if not node_type:
+                    self.logger.debug(f"Could not determine type for node {node_id}")
                     continue
 
-                # Create DucoNode object
+                # Skip the DucoBox itself (node_id 1 is usually the box)
+                # It's already published in _poll_system()
+                if node_type == NodeType.DUCOBOX:
+                    self.logger.debug(f"Skipping node {node_id} (is DucoBox system)")
+                    continue
+
+                # Get node info
+                node_info = self.duco_client.get_node_info(node_id)
+
+                if not node_info or 'type' not in node_info:
+                    self.logger.debug(f"No valid info for node {node_id}")
+                    continue
+
+                # Create DucoNode object only with non-null values
                 node = DucoNode(
                     device_id=f"node_{node_id}",
                     node_id=node_id,
                     node_type=node_type,
                     node_type_name=node_type.name,
-                    
-                    # Parameters from node_info
+
+                    # Parameters from node_info (only if present)
                     remaining_time_current_mode=node_info.get('remaining_time_seconds'),
                     flow_rate=node_info.get('flow_level_percent'),
                     air_quality_rh=node_info.get('air_quality_rh_percent'),
@@ -224,17 +234,36 @@ class DucoPollingService:
                     co2_level=node_info.get('co2_ppm')
                 )
 
-                nodes_to_publish.append(node)
+                # Only publish if node has at least some data
+                has_data = any([
+                    node.remaining_time_current_mode is not None,
+                    node.flow_rate is not None,
+                    node.air_quality_rh is not None,
+                    node.air_quality_co2 is not None,
+                    node.humidity_level is not None,
+                    node.co2_level is not None
+                ])
+
+                if has_data:
+                    nodes_to_publish.append(node)
+                    self.logger.debug(
+                        f"Node {node_id} ({node_type.name}): "
+                        f"humidity={node.humidity_level}, co2={node.co2_level}"
+                    )
+                else:
+                    self.logger.debug(f"Node {node_id} ({node_type.name}) has no data")
 
             except Exception as e:
-                self.logger.error(f"Error polling node {node_id}: {e}")
+                self.logger.error(f"Error polling node {node_id}: {e}", exc_info=True)
                 self.stats['errors'] += 1
 
         # Publish all nodes in batch
         if nodes_to_publish:
             count = self.redis_publisher.publish_duco_network(nodes_to_publish)
             self.stats['node_updates'] += count
-            self.logger.debug(f"Published {count} nodes to Redis")
+            self.logger.info(f"Published {count} nodes to Redis")
+        else:
+            self.logger.warning("No nodes with data to publish")
 
     def poll_now(self):
         """Trigger an immediate poll (in addition to scheduled polls)"""
@@ -252,16 +281,16 @@ class DucoPollingService:
     def set_ventilation_mode(self, mode: VentilationMode) -> bool:
         """
         Set ventilation mode and trigger immediate poll.
-        
+
         Args:
             mode: VentilationMode to set
-            
+
         Returns:
             True if successful
         """
         try:
             success = self.duco_client.set_ventilation_mode(mode)
-            
+
             if success:
                 self.logger.info(f"Set ventilation mode to {mode.name}")
                 # Poll immediately to update Redis with new state
@@ -271,7 +300,7 @@ class DucoPollingService:
             else:
                 self.logger.error(f"Failed to set ventilation mode to {mode.name}")
                 return False
-                
+
         except Exception as e:
             self.logger.error(f"Error setting ventilation mode: {e}")
             return False
@@ -279,17 +308,17 @@ class DucoPollingService:
     def identify_node(self, node_id: int, duration: float = 3.0) -> bool:
         """
         Identify a node by turning on its blue light.
-        
+
         Args:
             node_id: Node ID to identify
             duration: How long to keep identification on (seconds)
-            
+
         Returns:
             True if successful
         """
         try:
             success = self.duco_client.identify_node(node_id, enable=True, force=True)
-            
+
             if success:
                 self.logger.info(f"Identifying node {node_id} for {duration} seconds")
                 time.sleep(duration)
@@ -298,7 +327,7 @@ class DucoPollingService:
             else:
                 self.logger.error(f"Failed to identify node {node_id}")
                 return False
-                
+
         except Exception as e:
             self.logger.error(f"Error identifying node: {e}")
             return False
@@ -335,19 +364,19 @@ if __name__ == "__main__":
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
+
     # Initialize Duco Modbus client
     duco_client = DucoModbusClient(
         host="10.141.1.64",
         register_offset=0
     )
-    
+
     if not duco_client.connect():
         print("Failed to connect to DucoBox")
         exit(1)
-    
+
     print("Connected to DucoBox")
-    
+
     # Initialize Redis publisher
     redis_publisher = UnifiedRedisPublisher(
         redis_host='localhost',
@@ -355,20 +384,20 @@ if __name__ == "__main__":
         key_prefix='smarthome',
         enable_pubsub=True
     )
-    
+
     # Initialize polling service
     duco_service = DucoPollingService(
         duco_client=duco_client,
         redis_publisher=redis_publisher,
         poll_interval=30  # Poll every 30 seconds
     )
-    
+
     # Start service
     duco_service.start()
-    
+
     print("Duco polling service started.")
     print("Press Ctrl+C to stop.")
-    
+
     try:
         while True:
             time.sleep(10)
@@ -378,14 +407,14 @@ if __name__ == "__main__":
                   f"System Updates={stats['system_updates']}, "
                   f"Node Updates={stats['node_updates']}, "
                   f"Errors={stats['errors']}")
-            
+
             # Print current system status
             system = duco_service.get_system_summary()
             if system:
                 print(f"System: Mode={system.get('ventilation_mode_name')}, "
                       f"Humidity={system.get('humidity_level')}%, "
                       f"CO2={system.get('co2_level')}ppm")
-                
+
     except KeyboardInterrupt:
         print("\nStopping service...")
         duco_service.stop()
