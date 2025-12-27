@@ -2,7 +2,7 @@ import sys
 from enum import StrEnum
 
 from PyQt6.QtCore import QPointF, Qt, QRectF
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QLinearGradient, QConicalGradient
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QLinearGradient
 from PyQt6.QtWidgets import QWidget, QApplication
 
 
@@ -32,9 +32,10 @@ class SmartHomeWidget(QWidget):
     CO2_ELEVATED = 1000
     CO2_HIGH = 1500
 
-    def __init__(self, parent=None, temperature: float = None,
+    def __init__(self, parent=None, room_name: str = "Room", temperature: float = None,
                  humidity: float = None, co2: int = None):
         super().__init__(parent)
+        self.room_name = room_name
         self.temperature = temperature
         self.humidity = humidity
         self.co2 = co2
@@ -42,7 +43,7 @@ class SmartHomeWidget(QWidget):
         self.humidity_unit = Units.RELATIVE_HUMIDITY
         self.co2_unit = Units.PARTS_PER_MILLION
 
-        self.setMinimumSize(250, 250)
+        self.setMinimumSize(250, 280)  # Increased height for room name
 
     def get_temperature_color(self):
         """Return color based on temperature level"""
@@ -99,7 +100,7 @@ class SmartHomeWidget(QWidget):
         center_y = height / 2
 
         # Responsive sizing
-        dot_radius = min(width, height) * 0.35
+        dot_radius = min(width, height) * 0.3  # Slightly smaller for room name
         arc_width = max(12, int(dot_radius * 0.15))
         arc_radius = dot_radius + arc_width / 2 + 5
 
@@ -206,7 +207,26 @@ class SmartHomeWidget(QWidget):
             QPointF(center_x + line_length, center_y)
         )
 
-        # Font setup
+        # Draw room name at the top
+        font_room = QFont('Segoe UI', max(10, int(dot_radius * 0.2)), QFont.Weight.Bold)
+        painter.setFont(font_room)
+        painter.setPen(QPen(QColor(255, 255, 255)))
+
+        # Draw room name with shadow for better visibility
+        room_name_display = self.room_name[:15]  # Limit length
+        text_width = painter.fontMetrics().horizontalAdvance(room_name_display)
+        room_x = center_x - text_width / 2
+        room_y = center_y - dot_radius - 25
+
+        # Shadow
+        painter.setPen(QPen(QColor(0, 0, 0, 120)))
+        painter.drawText(QPointF(room_x + 1, room_y + 1), room_name_display)
+
+        # Main text
+        painter.setPen(QPen(QColor(255, 255, 255)))
+        painter.drawText(QPointF(room_x, room_y), room_name_display)
+
+        # Font setup for values
         font_size = max(12, int(dot_radius * 0.24))
         font = QFont('Segoe UI', font_size, QFont.Weight.Bold)
         painter.setFont(font)
@@ -239,7 +259,7 @@ class SmartHomeWidget(QWidget):
         text_height = painter.fontMetrics().height()
 
         x = center_x - text_width / 2
-        y = center_y + dot_radius + text_height - 5
+        y = center_y + dot_radius + text_height
 
         # Draw subtle glow effect for CO2 text
         painter.setPen(QPen(QColor(255, 255, 255, 60)))
@@ -276,8 +296,11 @@ class SmartHomeWidget(QWidget):
         y = center_y + dot_radius * 0.6
         painter.drawText(QPointF(x, y), hum_label)
 
-    def update_values(self, temperature: float = None, humidity: float = None, co2: int = None):
+    def update_values(self, room_name: str = None, temperature: float = None,
+                      humidity: float = None, co2: int = None):
         """Update sensor values and refresh display"""
+        if room_name is not None:
+            self.room_name = room_name
         if temperature is not None:
             self.temperature = temperature
         if humidity is not None:
@@ -285,6 +308,7 @@ class SmartHomeWidget(QWidget):
         if co2 is not None:
             self.co2 = co2
         self.update()
+
 
 
 if __name__ == "__main__":
